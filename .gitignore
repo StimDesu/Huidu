@@ -38,3 +38,4 @@ custom_upgrade.tar.gz
 # Buildroot / WSL build outputs live outside the repo (~/huidu-br); ignore any local copy
 br2-huidu/output*/
 br2-huidu/dl/
+__pycache__/
