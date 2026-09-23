@@ -19,6 +19,11 @@ Commands
               python hd_send.py send --host IP --boo project.boo img1.png ... --yes
   slideshow build a new one-area slideshow .boo from images and send it
               python hd_send.py slideshow --host IP a.png b.png --hold 50 --yes
+            any input format (JPG/PNG/BMP…, needs Pillow unless already a PNG of the
+            exact area size); area size from the board or --size WxH; --fit
+            contain|cover|stretch; --preview DIR saves the converted PNGs. With --size
+            and no reply from the board it runs offline (convert/preview only):
+              python hd_send.py slideshow --host IP *.jpg --size 352x384 --preview prev
 """
 
 import argparse
@@ -264,21 +269,46 @@ def png_size(data):
     return struct.unpack(">II", data[16:24])
 
 
-def prepare_image(path, w, h):
+def prepare_image(path, w, h, fit="contain", bg=(0, 0, 0)):
+    """Any image (JPG/PNG/BMP/...) -> PNG of exactly w x h, like HDPlayer's ConvertImage.
+
+    fit: stretch = scale to w x h ignoring aspect (HDPlayer KeepRatio=0);
+         contain = whole picture visible, bars filled with bg;
+         cover   = fill the area, crop the overflow (centred).
+    """
     data = open(path, "rb").read()
     if png_size(data) == (w, h):
-        return data
+        return data, "PNG %dx%d, без изменений" % (w, h)
     try:
-        from PIL import Image
-        import io
-        im = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h))
-        buf = io.BytesIO()
-        im.save(buf, "PNG")
-        log("   %s: приведено к %dx%d PNG" % (os.path.basename(path), w, h))
-        return buf.getvalue()
+        from PIL import Image, ImageOps
     except ImportError:
-        raise SystemExit("%s: нужен PNG ровно %dx%d (или установите Pillow: pip install pillow)"
-                         % (path, w, h))
+        raise SystemExit("%s: нужна конвертация в PNG %dx%d. Установите Pillow:\n"
+                         "    python -m pip install pillow" % (path, w, h))
+    import io
+    im = Image.open(io.BytesIO(data))
+    src = "%s %dx%d" % (im.format, im.width, im.height)
+    im = ImageOps.exif_transpose(im).convert("RGBA")   # phone photos: honour EXIF rotation
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    if fit == "stretch":
+        im = im.resize((w, h), resample)
+    elif fit == "cover":
+        im = ImageOps.fit(im, (w, h), resample)
+    else:
+        im = ImageOps.contain(im, (w, h), resample)
+        canvas = Image.new("RGBA", (w, h), bg + (255,))
+        canvas.paste(im, ((w - im.width) // 2, (h - im.height) // 2), im)
+        im = canvas
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue(), "%s -> PNG %dx%d (%s)" % (src, w, h, fit)
+
+
+def parse_size(txt):
+    try:
+        w, h = (int(x) for x in txt.lower().replace("х", "x").split("x"))
+        return w, h
+    except ValueError:
+        raise SystemExit("--size ожидает ШxВ, например 352x384")
 
 
 def build_boo(images, dev_id, dev_name, model, width, height, rotation, hold, title):
@@ -400,6 +430,11 @@ def main():
     sl.add_argument("--hold", type=int, default=50, help="HoldTime, как в HDPlayer (по умолчанию 50)")
     sl.add_argument("--title", default="Project1")
     sl.add_argument("--save-boo", help="сохранить сгенерированный .boo в файл")
+    sl.add_argument("--size", help="размер области ШxВ как в HDPlayer (по умолчанию — из платы с учётом поворота)")
+    sl.add_argument("--fit", choices=["contain", "cover", "stretch"], default="contain",
+                    help="contain: целиком с полями (по умолч.), cover: заполнить с обрезкой, stretch: растянуть")
+    sl.add_argument("--bg", default="000000", help="цвет полей для contain, RRGGBB")
+    sl.add_argument("--preview", help="сохранить сконвертированные картинки в эту папку")
 
     for p in (r, s, sl):
         p.add_argument("--host", required=True)
@@ -434,21 +469,41 @@ def main():
     else:
         info = udp_info(a.host)
         if not info:
-            raise SystemExit("Плата не ответила по UDP — нужны ID/размер экрана для проекта")
-        w, h = (info["h"], info["w"]) if info["rot"] % 2 else (info["w"], info["h"])
-        log("Плата %s (%s), экран %dx%d, поворот %d -> область %dx%d"
-            % (info["id"], info["name"], info["w"], info["h"], info["rot"], w, h))
+            if a.yes or not a.size:
+                raise SystemExit("Плата не ответила по UDP — нужны её ID/имя для проекта "
+                                 "(для офлайн-предпросмотра укажите --size без --yes)")
+            info = {"id": "OFFLINE", "model": "C35", "w": 0, "h": 0, "name": "OFFLINE", "rot": 0}
+            log("Плата не ответила — офлайн-режим, только конвертация/предпросмотр")
+        else:
+            log("Плата %s (%s), экран %dx%d, поворот %d"
+                % (info["id"], info["name"], info["w"], info["h"], info["rot"]))
+        if a.size:
+            w, h = parse_size(a.size)
+        else:
+            w, h = (info["h"], info["w"]) if info["rot"] % 2 else (info["w"], info["h"])
+        log("Размер области проекта: %dx%d" % (w, h))
+        bg = tuple(int(a.bg[i:i + 2], 16) for i in (0, 2, 4))
+        if a.preview:
+            os.makedirs(a.preview, exist_ok=True)
         files, imgs = {}, []
         for f in a.images:
-            d = prepare_image(f, w, h)
+            d, how = prepare_image(f, w, h, a.fit, bg)
             m = md5(d)
+            dup = "  (такой же файл уже в списке — на плату уйдёт один раз)" if m + ".png" in files else ""
+            log("   %-28s %s -> %s.png %d байт%s" % (os.path.basename(f), how, m, len(d), dup))
             files[m + ".png"] = d
             imgs.append((xml_escape(os.path.splitext(os.path.basename(f))[0]), m))
+            if a.preview:
+                open(os.path.join(a.preview, os.path.splitext(os.path.basename(f))[0] + ".png"), "wb").write(d)
+        log("Слайдов: %d, уникальных файлов: %d" % (len(imgs), len(files)))
         boo = build_boo(imgs, info["id"], xml_escape(info["name"]), info["model"], w, h,
                         info["rot"], a.hold, xml_escape(a.title))
         boo_name = md5(boo) + ".boo"
         if a.save_boo:
             open(a.save_boo, "wb").write(boo)
+        if info["id"] == "OFFLINE":
+            log("Офлайн-режим: отправка невозможна.")
+            return 0
 
     if not confirm(a, a.host, boo_name, boo, files):
         return 0
