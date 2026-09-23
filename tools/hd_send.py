@@ -24,10 +24,13 @@ Commands
             contain|cover|stretch; --preview DIR saves the converted PNGs. With --size
             and no reply from the board it runs offline (convert/preview only):
               python hd_send.py slideshow --host IP *.jpg --size 352x384 --preview prev
+            images may be files, folders (all images inside, natural name order) or
+            wildcards:  python hd_send.py slideshow --host IP C:\\ads\\screen206 --yes
 """
 
 import argparse
 import datetime
+import glob
 import hashlib
 import os
 import socket
@@ -303,6 +306,42 @@ def prepare_image(path, w, h, fit="contain", bg=(0, 0, 0)):
     return buf.getvalue(), "%s -> PNG %dx%d (%s)" % (src, w, h, fit)
 
 
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff")
+
+
+def natural_key(path):
+    """'2.jpg' before '10.jpg'."""
+    import re
+    name = os.path.basename(path).lower()
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
+
+
+def expand_images(args):
+    """Files, folders (their images, natural order, not recursive) and wildcards
+    (cmd.exe does not expand *.jpg itself) -> list of image paths."""
+    out = []
+    for arg in args:
+        if os.path.isdir(arg):
+            found = sorted((os.path.join(arg, n) for n in os.listdir(arg)
+                            if n.lower().endswith(IMAGE_EXT)
+                            and os.path.isfile(os.path.join(arg, n))), key=natural_key)
+            if not found:
+                log("! в папке %s нет изображений (%s)" % (arg, ", ".join(IMAGE_EXT)))
+            out += found
+        elif any(c in arg for c in "*?["):
+            found = sorted((f for f in glob.glob(arg) if os.path.isfile(f)), key=natural_key)
+            if not found:
+                log("! по шаблону %s ничего не найдено" % arg)
+            out += found
+        elif os.path.isfile(arg):
+            out.append(arg)
+        else:
+            raise SystemExit("Нет такого файла или папки: %s" % arg)
+    if not out:
+        raise SystemExit("Не найдено ни одного изображения")
+    return out
+
+
 def parse_size(txt):
     try:
         w, h = (int(x) for x in txt.lower().replace("х", "x").split("x"))
@@ -426,7 +465,7 @@ def main():
     s.add_argument("files", nargs="*", help="изображения; на плату уйдут как <md5>.<ext>")
 
     sl = sub.add_parser("slideshow")
-    sl.add_argument("images", nargs="+")
+    sl.add_argument("images", nargs="+", help="файлы, папки (все картинки в папке по порядку имён) или шаблоны *.jpg")
     sl.add_argument("--hold", type=int, default=50, help="HoldTime, как в HDPlayer (по умолчанию 50)")
     sl.add_argument("--title", default="Project1")
     sl.add_argument("--save-boo", help="сохранить сгенерированный .boo в файл")
@@ -467,6 +506,8 @@ def main():
             d = open(f, "rb").read()
             files[md5(d) + os.path.splitext(f)[1].lower()] = d
     else:
+        paths = expand_images(a.images)
+        log("Изображений: %d" % len(paths))
         info = udp_info(a.host)
         if not info:
             if a.yes or not a.size:
@@ -486,7 +527,7 @@ def main():
         if a.preview:
             os.makedirs(a.preview, exist_ok=True)
         files, imgs = {}, []
-        for f in a.images:
+        for f in paths:
             d, how = prepare_image(f, w, h, a.fit, bg)
             m = md5(d)
             dup = "  (такой же файл уже в списке — на плату уйдёт один раз)" if m + ".png" in files else ""
