@@ -39,6 +39,7 @@ import sys
 import time
 import uuid
 
+VERSION = "2026-09-23 folders"
 PORT = 9527
 CHUNK = 9212             # 0x0019 payload size used by HDPlayer
 WINDOW = 3               # max unacknowledged 0x0019 chunks (HDPlayer ran ~3 ahead)
@@ -480,7 +481,9 @@ def main():
         p.add_argument("--yes", action="store_true", help="реально отправить")
         p.add_argument("--resend", action="store_true", help="слать файлы даже если они уже на плате")
         p.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--version", action="version", version=VERSION)
     a = ap.parse_args()
+    log("hd_send.py версия %s" % VERSION)
     VERBOSE = getattr(a, "verbose", False)
 
     if a.cmd == "extract":
